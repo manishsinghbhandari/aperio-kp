@@ -1,0 +1,200 @@
+1. add helm chart for apisix
+
+helm repo add apisix https://apache.github.io/apisix-helm-chart
+helm repo update
+
+helm search repo apisix/apisix --versions | head -20
+or 
+manishbhandari@MSB-MacBook-Pro apisix % helm search repo apisix/apisix --versions | grep '2.9.0'
+apisix/apisix                   	2.9.0        	3.10.0     	A Helm chart for Apache APISIX v3
+apisix/apisix                   	0.5.0        	2.9.0      	A Helm chart for Apache APISIX
+apisix/apisix-dashboard         	0.3.0        	2.9.0      	A Helm chart for Apache APISIX Dashboard
+
+
+helm show values apisix/apisix --version 2.9.0 > apisix-values.yaml
+
+helm show chart apisix/apisix --version 2.9.0
+annotations:
+  artifacthub.io/prerelease: "false"
+apiVersion: v2
+appVersion: 3.10.0        <<<
+dependencies:
+- condition: etcd.enabled
+  name: etcd
+  repository: https://charts.bitnami.com/bitnami
+  version: 9.7.3
+- alias: dashboard
+  condition: dashboard.enabled
+  name: apisix-dashboard
+  repository: https://charts.apiseven.com
+  version: 0.8.2
+- alias: ingress-controller
+  condition: ingress-controller.enabled
+  name: apisix-ingress-controller
+  repository: https://charts.apiseven.com
+  version: 0.14.0
+description: A Helm chart for Apache APISIX v3
+icon: https://apache.org/logos/res/apisix/apisix.png
+maintainers:
+- name: tao12345666333
+name: apisix
+sources:
+- https://github.com/apache/apisix-helm-chart
+type: application
+version: 2.9.0  <<<<
+
+
+2. add this image
+=================
+vim apisix-values.yaml
+
+etcd:
+  enabled: true
+  replicaCount: 1
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/etcd
+    tag: 3.5.10-debian-11-r2
+	
+wq!
+
+
+3. Validate the Helm template
+==============================
+helm template apisix apisix/apisix --namespace apisix --version 2.9.0 -f apisix-values.yaml > apisix-rendered.yaml
+  
+
+4. Install APISIX using Helm
+=============================
+helm upgrade --install apisix apisix/apisix --namespace apisix --create-namespace --version 2.9.0 -f apisix-values.yaml
+
+manishbhandari@MSB-MacBook-Pro apisix % kubectl get pod -n apisix
+NAME                                READY   STATUS    RESTARTS      AGE
+apisix-dashboard-6fdd8dfb77-kxqbw   1/1     Running   4 (51s ago)   106s
+apisix-df695954b-64j2t              1/1     Running   0             106s
+apisix-etcd-0                       1/1     Running   0             106s
+
+manishbhandari@MSB-MacBook-Pro apisix % helm list -n apisix
+NAME  	NAMESPACE	REVISION	UPDATED                             	STATUS  	CHART       	APP VERSION
+apisix	apisix   	1       	2026-11-11 19:25:04.582771 +0530 IST	deployed	apisix-2.9.0	3.10.0
+
+
+
+kubectl logs -n apisix deployment/apisix-dashboard --tail=50      # check logs
+
+
+
+6. Deploy nginx app1 and app2
+===========================
+kubectl apply -f nginx-app1-and-app2.yaml
+
+
+manishbhandari@MSB-MacBook-Pro apisix % kubectl get pods,svc -n apisix
+NAME                                    READY   STATUS    RESTARTS        AGE
+pod/apisix-dashboard-6fdd8dfb77-kxqbw   1/1     Running   4 (5m33s ago)   6m28s
+pod/apisix-df695954b-64j2t              1/1     Running   0               6m28s
+pod/apisix-etcd-0                       1/1     Running   0               6m28s
+pod/app1-867b774bdc-ghvrx               1/1     Running   0               109s
+pod/app2-67f4456cf7-78ckl               1/1     Running   0               109s
+
+NAME                           TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)             AGE
+service/apisix-admin           ClusterIP   10.96.32.153    <none>        9180/TCP            6m28s
+service/apisix-dashboard       ClusterIP   10.96.207.0     <none>        80/TCP              6m28s
+service/apisix-etcd            ClusterIP   10.96.97.80     <none>        2379/TCP,2380/TCP   6m28s
+service/apisix-etcd-headless   ClusterIP   None            <none>        2379/TCP,2380/TCP   6m28s
+service/apisix-gateway         NodePort    10.96.190.90    <none>        80:30627/TCP        6m28s
+service/app1                   ClusterIP   10.96.128.123   <none>        80/TCP              109s   <<
+service/app2                   ClusterIP   10.96.45.94     <none>        80/TCP              109s   <<
+service/nginx-backend          ClusterIP   10.96.124.52    <none>        80/TCP              178m
+
+
+5. Create haproxy configmap
+=======================
+cat > haproxy.cfg
+global
+    log stdout format raw local0
+    maxconn 2000
+
+defaults
+    log global
+    mode http
+    option httplog
+    timeout connect 5s
+    timeout client  30s
+    timeout server  30s
+
+frontend http_front
+    bind *:8080
+    default_backend nginx_apps
+
+backend nginx_apps
+    balance roundrobin
+    option httpchk GET /
+    server app1 app1.apisix.svc.cluster.local:80 check
+    server app2 app2.apisix.svc.cluster.local:80 check
+
+
+kubectl create configmap haproxy-config --namespace apisix --from-file=haproxy.cfg
+kubectl get cm -n apisix
+NAME               DATA   AGE
+apisix             1      8m41s
+apisix-dashboard   1      8m41s
+haproxy-config     1      10s  <<<
+kube-root-ca.crt   1      3h42m 
+
+
+
+
+Deploy haproxy
+==============
+kubectl apply -f haproxy.yaml
+
+kubectl get pods,svc -n apisix
+NAME                                    READY   STATUS    RESTARTS      AGE
+pod/apisix-dashboard-6fdd8dfb77-kxqbw   1/1     Running   4 (10m ago)   11m
+pod/apisix-df695954b-64j2t              1/1     Running   0             11m
+pod/apisix-etcd-0                       1/1     Running   0             11m
+pod/app1-867b774bdc-ghvrx               1/1     Running   0             6m22s
+pod/app2-67f4456cf7-78ckl               1/1     Running   0             6m22s
+pod/haproxy-75fff774bd-bx7mx            1/1     Running   0             21s   <<<<
+
+NAME                           TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)             AGE
+service/apisix-admin           ClusterIP   10.96.32.153    <none>        9180/TCP            11m
+service/apisix-dashboard       ClusterIP   10.96.207.0     <none>        80/TCP              11m
+service/apisix-etcd            ClusterIP   10.96.97.80     <none>        2379/TCP,2380/TCP   11m
+service/apisix-etcd-headless   ClusterIP   None            <none>        2379/TCP,2380/TCP   11m
+service/apisix-gateway         NodePort    10.96.190.90    <none>        80:30627/TCP        11m
+service/app1                   ClusterIP   10.96.128.123   <none>        80/TCP              6m22s
+service/app2                   ClusterIP   10.96.45.94     <none>        80/TCP              6m22s
+service/haproxy                ClusterIP   10.96.94.26     <none>        8080/TCP            21s   <<<<
+service/nginx-backend          ClusterIP   10.96.124.52    <none>        80/TCP              3h3m
+
+
+
+
+6. create route on apisix dashboard
+
+kubectl port-forward -n apisix svc/apisix-dashboard 9000:80
+
+admin/admin
+
+1. left side click on route -> then click on create.
+
+attached the screenshort in repo.
+
+
+7. Testing
+
+sudo  kubectl port-forward -n apisix svc/haproxy 80:8080
+
+manishbhandari@MSB-MacBook-Pro apisix % curl -i localhost/app1/
+HTTP/1.1 200 OK
+content-type: text/html; charset=utf-8
+content-length: 25
+date: Wed, 11 Nov 2026 17:32:01 GMT
+last-modified: Wed, 11 Nov 2026 17:21:25 GMT
+etag: "6af4a415-19"
+accept-ranges: bytes
+server: APISIX/3.10.0
+
+Hello from Application 1
